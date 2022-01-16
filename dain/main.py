@@ -1,4 +1,5 @@
 import shutil
+from threaded_fn import threaded_fn
 import os
 import sys
 import scipy.signal
@@ -19,7 +20,6 @@ import keras.backend as K
 import tensorlayer as tl
 
 
-#file = "out.flac"
 file = "/mnt/maestro-v3.0.0/repeat.flac"
 DATA_DURATION = 2
 SAMPLE_RATE = 20480
@@ -37,79 +37,31 @@ def init_stream():
 	)
 
 
-stream_lock = threading.Lock()
 class Dataset(Sequence):
 	def __init__(self, batch_size):
 		self.stream = init_stream()
 		self.batch_size = batch_size
 
-
 	def raw(self):
-		stream_lock.acquire()
 		try:
 			wav = next(self.stream)
 		except RuntimeError:
 			print("failed")
-			if stream_lock.locked(): stream_lock.release()
 			return self.raw()
 		except StopIteration:
 			print("DONE: RESTARTING")
-			if stream_lock.locked(): stream_lock.release()
 			self.stream = init_stream()
 			return self.raw()
 		if len(wav) != SAMPLE_RATE * DATA_DURATION:
-			if stream_lock.locked(): stream_lock.release()
 			return self.raw()
-		if stream_lock.locked(): stream_lock.release()
 		return wav
 
-	def get(self):
-		raw = self.raw()
-		#resampled = raw[::COMPRESSION_RATE]
-		resampled = np.mean(raw.reshape(-1, COMPRESSION_RATE), axis=1)
-		#resampled = np.array([resampled.T]).T
-		#`raw = np.array([raw.T]).T
-		return resampled[..., None], raw[..., None]
-	
 	def __len__(self):
 		return num_samples // self.batch_size
 	
 	def __getitem__(self, i):
-		x = []
-		y = []
-
-		for _ in range(self.batch_size):
-			gx, gy = self.get()
-			x.append(gx)
-			y.append(gy)
-		
-		x = np.array(x)
-		y = np.array(y)
-
-		return x, y
-
-
-def _phase_shift(I, r):
-    bsize, a, b, c = I.get_shape().as_list()
-    bsize = tf.shape(I)[0] # Handling Dimension(None) type for undefined batch dim
-    X = tf.reshape(I, (bsize, a, b, r, r))
-    X = tf.transpose(X, (0, 1, 2, 4, 3))  # bsize, a, b, 1, 1
-    X = tf.split(1, a, X)  # a, [bsize, b, r, r]
-    X = tf.concat(2, [tf.squeeze(x, axis=1) for x in X])  # bsize, b, a*r, r
-    X = tf.split(1, b, X)  # b, [bsize, a*r, r]
-    X = tf.concat(2, [tf.squeeze(x, axis=1) for x in X])  # bsize, a*r, b*r
-    return tf.reshape(X, (bsize, a*r, b*r, 1))
-
-
-def PS(X, r, color=False):
-    if color:
-        Xc = tf.split(3, 3, X)
-        X = tf.concat(3, [_phase_shift(x, r) for x in Xc])
-    else:
-        X = _phase_shift(X, r)
-    return X
-
-
+		batch = np.array([self.raw() for i in range(self.batch_size)])
+		return batch, batch
 
 class SubPixel1D(layers.Layer):
 	def __init__(self, r):
@@ -122,15 +74,8 @@ class SubPixel1D(layers.Layer):
 			X = tf.transpose(a=X, perm=[2,1,0])
 			return X
 
-
-
 from tensorflow.python.keras import backend as K
-from keras.layers import merge
-from keras.layers.core import Activation, Dropout
-from keras.layers import Conv1D
-from keras.layers import BatchNormalization
-from keras.layers.advanced_activations import LeakyReLU
-from keras.initializers import RandomNormal, Orthogonal
+from keras.layers import Conv1D, MaxPool1D, LeakyReLU, Dropout
 
 class Autoencoder(Model):
 	def __init__(self):
@@ -157,26 +102,61 @@ class Autoencoder(Model):
 			layers.Activation("relu"),
 			SubPixel1D(r=2),
 		"""
-		scale = 1
-		self.model = tf.keras.Sequential([
+		self.encoder = tf.keras.Sequential([
+			layers.Input(shape=(40960, 1)),
+
+			Conv1D(filters=32, kernel_size=33, activation=None, padding="same"),
+			Dropout(rate=0.25),
+			MaxPool1D(pool_size=2, padding="same"),
+			LeakyReLU(0.2),
+
+			Conv1D(filters=16, kernel_size=17, activation=None, padding="same"),
+			Dropout(rate=0.25),
+			MaxPool1D(pool_size=2, padding="same"),
+			LeakyReLU(0.2),
+
+			Conv1D(filters=8, kernel_size=9, activation=None, padding="same"),
+			Dropout(rate=0.25),
+			MaxPool1D(pool_size=2, padding="same"),
+			LeakyReLU(0.2),
+
+			Conv1D(filters=4, kernel_size=5, activation=None, padding="same"),
+			Dropout(rate=0.25),
+			MaxPool1D(pool_size=2, padding="same"),
+			LeakyReLU(0.2),
+
+			Conv1D(filters=2, kernel_size=5, activation=None, padding="same"),
+			Dropout(rate=0.25),
+			LeakyReLU(0.2),
+
+			Conv1D(filters=1, kernel_size=5, activation=None, padding="same"),
+			Dropout(rate=0.25),
+			LeakyReLU(0.2),
+
+
+
+		])
+
+
+		self.decoder = tf.keras.Sequential([
 			layers.Input(shape=(2560, 1)),
 
-			Conv1D(filters=2*128//scale, kernel_size=65, activation=None, padding="same"),
-			Dropout(rate=0.5),
+			Conv1D(filters=2*32, kernel_size=33, activation=None, padding="same"),
+			Dropout(rate=0.25),
 			SubPixel1D(r=2),
-			Conv1D(filters=128//scale, kernel_size=65, activation=None, padding="same"),
+			Conv1D(filters=32, kernel_size=33, activation=None, padding="same"),
 			LeakyReLU(0.2),
 
-			Conv1D(filters=2*384//scale, kernel_size=33, activation=None, padding="same"),
-			Dropout(rate=0.5),
+			Conv1D(filters=2*96, kernel_size=17, activation=None, padding="same"),
+			Dropout(rate=0.25),
 			SubPixel1D(r=2),
-			Conv1D(filters=384//scale, kernel_size=33, activation=None, padding="same"),
+			Conv1D(filters=96, kernel_size=17, activation=None, padding="same"),
 			LeakyReLU(0.2),
 
-			Conv1D(filters=2*512//scale, kernel_size=17, activation=None, padding="same"),
-			Dropout(rate=0.5),
+			Conv1D(filters=2*128, kernel_size=9, activation=None, padding="same"),
+			Dropout(rate=0.25),
 			SubPixel1D(r=2),
-			Conv1D(filters=512//scale, kernel_size=17, activation=None, padding="same"),
+			Conv1D(filters=128, kernel_size=9, activation=None, padding="same"),
 			LeakyReLU(0.2),
 
 
@@ -188,7 +168,7 @@ class Autoencoder(Model):
 		])
 
 	def call(self, x):
-		return self.model(x)	
+		return self.decoder(self.encoder(x))	
 
 
 
@@ -203,27 +183,32 @@ class EvaluationCallback(Callback):
 	def on_epoch_begin(self, epoch, logs=None):
 		self.epoch = epoch
 
+	@threaded_fn
 	def on_train_batch_end(self, batch, logs=None):
-		if batch % (100) != 0:
+		if batch % (500) != 0:
 			return
 
-		point = Dataset(1)[100]
 
 		piano = librosa.load("../piano.wav", sr=SAMPLE_RATE)[0]
-		real = piano[:SAMPLE_RATE * DATA_DURATION]
-
-		small = np.mean(real.reshape(-1, COMPRESSION_RATE), axis=1)
-		small = np.squeeze(small)
-		small = small[None, ..., None]
-
-
-		pred = tf.squeeze(self.model(small))
-
-		time = np.linspace(0, len(pred) / 44100, num=len(pred))
+		piano = np.squeeze(piano)
 
 		plt.clf()
-		plt.plot(time, real)
-		plt.plot(time, pred, alpha=0.5)
+		fig, axs = plt.subplots(5, figsize=(15, 30))
+		for i in range(5):
+
+			real = np.squeeze(piano[SAMPLE_RATE*DATA_DURATION*i:SAMPLE_RATE * DATA_DURATION*(i+1)])
+			real = np.squeeze(real)[None, ...]
+
+
+			pred = np.squeeze(self.model(real))
+			real = np.squeeze(real)
+
+			time = np.linspace(0, len(pred) / 44100, num=len(pred))
+
+
+			axs[i].plot(time, real, label="real")
+			axs[i].plot(time, pred, alpha=0.5, label="pred")
+		plt.legend(["real", "small", "pred"])
 		os.makedirs(f"eval/{self.epoch}/{batch}")
 		os.chdir(f"eval/{self.epoch}/{batch}")
 
@@ -231,12 +216,12 @@ class EvaluationCallback(Callback):
 		scipy.io.wavfile.write(f"pred.mp3", SAMPLE_RATE, np.array(pred))
 
 		plt.savefig(f"fig")
+		plt.close()
 
 		os.chdir("../../..")
 
 
 def loss(a, b):
-	#err = tf.signal.stft(tf.squeeze(a), 512, 512) - tf.signal.stft(tf.squeeze(b), 512, 512)
 	err = a - b
 	return K.mean(K.square(err))
 
@@ -244,11 +229,11 @@ ds = Dataset(4)
 
 autoencoder = Autoencoder()
 schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-	0.000025,
-	decay_steps=25000,
+	0.0001,
+	decay_steps=5000,
 	decay_rate=0.996,
 )
-autoencoder.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.000025, decay=0.01), loss=loss)
+autoencoder.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=schedule), loss=loss)
 autoencoder.fit(ds, epochs=10, callbacks=[EvaluationCallback()])
 
 #lower lr
