@@ -64,7 +64,7 @@ class Dataset(Sequence):
 		return batch, batch
 
 class SubPixel1D(layers.Layer):
-	def __init__(self, r):
+	def __init__(self, r: int):
 		super(SubPixel1D, self).__init__()
 		self.r = r
 	def call(self, I):
@@ -74,6 +74,7 @@ class SubPixel1D(layers.Layer):
 			X = tf.transpose(a=X, perm=[2,1,0])
 			return X
 
+quit()
 from tensorflow.python.keras import backend as K
 from keras.layers import Conv1D, MaxPool1D, LeakyReLU, Dropout
 
@@ -105,22 +106,22 @@ class Autoencoder(Model):
 		self.encoder = tf.keras.Sequential([
 			layers.Input(shape=(40960, 1)),
 
-			Conv1D(filters=32, kernel_size=33, activation=None, padding="same"),
+			Conv1D(filters=128, kernel_size=33, activation=None, padding="same"),
 			Dropout(rate=0.25),
 			MaxPool1D(pool_size=2, padding="same"),
 			LeakyReLU(0.2),
 
-			Conv1D(filters=16, kernel_size=17, activation=None, padding="same"),
+			Conv1D(filters=96, kernel_size=17, activation=None, padding="same"),
 			Dropout(rate=0.25),
 			MaxPool1D(pool_size=2, padding="same"),
 			LeakyReLU(0.2),
 
-			Conv1D(filters=8, kernel_size=9, activation=None, padding="same"),
+			Conv1D(filters=32, kernel_size=9, activation=None, padding="same"),
 			Dropout(rate=0.25),
 			MaxPool1D(pool_size=2, padding="same"),
 			LeakyReLU(0.2),
 
-			Conv1D(filters=4, kernel_size=5, activation=None, padding="same"),
+			Conv1D(filters=8, kernel_size=5, activation=None, padding="same"),
 			Dropout(rate=0.25),
 			MaxPool1D(pool_size=2, padding="same"),
 			LeakyReLU(0.2),
@@ -223,18 +224,25 @@ class EvaluationCallback(Callback):
 
 def loss(a, b):
 	err = a - b
-	return K.mean(K.square(err))
+	return K.mean(K.square(K.abs(err)))
+
 
 ds = Dataset(4)
+a = ds[0][0]
+b = np.zeros(a.shape)
+print("zero")
+print(loss(a, b))
+# baseline: 0.09837941929550056
 
 autoencoder = Autoencoder()
+
 schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-	0.0001,
+	0.00001,
 	decay_steps=5000,
 	decay_rate=0.996,
 )
 autoencoder.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=schedule), loss=loss)
-autoencoder.fit(ds, epochs=10, callbacks=[EvaluationCallback()])
+autoencoder.fit(ds, epochs=20, callbacks=[EvaluationCallback()])
 
 #lower lr
 #easing model
